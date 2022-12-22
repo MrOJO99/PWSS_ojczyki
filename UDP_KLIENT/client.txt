@@ -1,0 +1,111 @@
+#define _WINSOCK_DEPRECATED_NO_WARNINGS
+#undef UNICODE
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#define ROZMIAR 20
+#define _XOPEN_SOURCE_EXTENDED 1
+#include <iostream>
+#include <fstream>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <iphlpapi.h>
+#include <filesystem>
+#include <stdio.h>
+#include <stdlib.h>
+#include <fcntl.h>
+#include <string.h>
+#include <io.h>
+
+#pragma warning(disable : 4996)
+#pragma comment(lib, "ws2_32.lib")
+
+using namespace std;
+int main()
+{
+	WSADATA wsaData;
+	// inicjalizacja żądanej wersja biblioteki WinSock
+	int iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
+	if (iResult != 0) {
+		printf("WSAStartup failed: %d\n", iResult);
+		return 1;
+	}
+	int dane[ROZMIAR];
+	unsigned short port = 1711;
+	struct sockaddr_in sa;
+	struct sockaddr_in nadawca;
+	inet_pton(AF_INET, "127.0.0.1", &(sa.sin_addr)); // Inicjalizacja struktury
+	sa.sin_port = ntohs(port); // Konwersja portu na postać sieciową
+	sa.sin_family = AF_INET; // Ustawienie adresu IP na format IPv4
+	int socketS = socket(sa.sin_family, SOCK_DGRAM, 0); // Stworzenie gniazda dla Serwer
+	if (socketS == -1) // Kontrola błędów
+	{
+		cout << "Błąd podczas tworzenia socketu!" << endl;
+		WSACleanup(); //na koniec programu zwalniamy interfejs
+		return 1;
+	}
+	int result = bind(socketS, (struct sockaddr*)&sa, sizeof(sa)); // Przypisywanie adresu do gniazda
+
+	if (result == -1) // Kontrola błędów
+	{
+		cout << "Błąd podczas przypisywania socketu!" << endl;
+		WSACleanup(); //na koniec programu zwalniamy interfejs
+		return 1;
+	}
+	////////////////////////////////////////////////////////////////////////////////////////
+
+
+
+	int size = sizeof(nadawca);
+	int const sizer = 1024;
+	char data[sizer]= "";
+	//FILE* file;
+	pollfd mpoll;
+	int fd = open("client.txt", O_CREAT | O_WRONLY | O_BINARY);
+	memset(&mpoll, 0, sizeof(mpoll));
+	mpoll.fd = fd;
+	mpoll.events = POLLIN;
+	int ret;
+	int received_size = 0;
+	ret = WSAPoll(&mpoll, 1, 0);
+	
+
+	while (true) {
+		if (ret == 1) {
+			received_size = recvfrom(socketS, data, sizer,0, (sockaddr*)&nadawca, &size);
+			if (received_size == SOCKET_ERROR) {
+				close(fd);
+				closesocket(socketS);
+				WSACleanup();
+				return 1;
+			}
+			if (strcmp(data,"NOFILE")==0) {
+				close(fd);
+				closesocket(socketS);
+				WSACleanup();
+				return 1;
+			}
+			if (strcmp(data, NULL) == 0) {
+				close(fd);
+				closesocket(socketS);
+				WSACleanup();
+				return 1;
+			}
+			else {
+				cout << "Data transfer succesfull" << endl;
+			}
+			write(fd, data, received_size);
+
+		}else {
+			cout << "File doesn't open" << endl;
+			close(fd);
+		}
+	}
+	
+	WSACleanup();
+	closesocket(socketS);
+}
