@@ -23,17 +23,16 @@
 #include <map>
 #include <vector>
 #include <iterator>
-#include <openssl/ssl.h>
 
 #pragma warning(disable : 4996)
 #pragma comment(lib, "ws2_32.lib")
 
 using namespace std;
-
+#include <openssl/ssl.h>
 
 #define SERVER "127.0.0.1"
 #define PORT 12345
-#define MAX_MESSAGE_LENGTH 1024
+#define MAX_MESSAGE_LENGTH 4096
 
 int main(int argc, char* argv[]) {
 	WSADATA wsa_data;
@@ -57,7 +56,8 @@ int main(int argc, char* argv[]) {
 	OpenSSL_add_all_algorithms();
 
 	ssl_context = SSL_CTX_new(DTLS_client_method());
-	if (ssl_context == NULL) {
+	if (ssl_context == NULL){
+		WSACleanup(); 
 		fprintf(stderr, "SSL_CTX_new failed\n");
 		return 1;
 	}
@@ -65,6 +65,8 @@ int main(int argc, char* argv[]) {
 	// Tworzenie gniazda klienta
 	client_socket = socket(AF_INET, SOCK_DGRAM, 0);
 	if (client_socket == INVALID_SOCKET) {
+		SSL_CTX_free(ssl_context);
+		WSACleanup(); 
 		fprintf(stderr, "socket failed\n");
 		return 1;
 	}
@@ -76,58 +78,84 @@ int main(int argc, char* argv[]) {
 	// Tworzenie kontekstu szyfrowania SSL
 	ssl = SSL_new(ssl_context);
 	if (ssl == NULL) {
+		SSL_CTX_free(ssl_context);
+		closesocket(client_socket);
+
+		WSACleanup(); 
 		fprintf(stderr, "SSL_new failed\n");
 		return 1;
 	}
 	// Powiązanie kontekstu szyfrowania SSL z gniazdem połączenia
-	SSL_set_fd(ssl, client_socket);
+	if (SSL_set_fd(ssl, client_socket) == NULL) {
+		SSL_CTX_free(ssl_context);
+		SSL_free(ssl);
+		closesocket(client_socket);
 
+		WSACleanup();
+		fprintf(stderr, "SSL_set_fd failed\n");
+		return 1;
+	};
+
+
+	int seq_num = 0;
 	// Pętla komunikacji z serwerem
 	while (1) {
+		seq_num = 0;
 		// Oczekiwanie na wprowadzenie wiadomości od użytkownika
 		printf("> ");
 		fgets(message, MAX_MESSAGE_LENGTH, stdin);
-		message_length = strlen(message);
+
+		char temp[MAX_MESSAGE_LENGTH];
+		strncpy(temp, message, strlen(message));
+		temp[strlen(message)] = '\0';
+		sprintf(message, "%d %s", seq_num, temp);
+
 		// Usunięcie znaku nowej linii z końca wiadomości
-		if (message[message_length - 1] == '\n') {
-			message[message_length - 1] = '\0';
-			message_length--;
+		if (message[strlen(message) - 1] == '\n') {
+			message[strlen(message) - 1] = '\0';
 		}
-
-
-		if (strncmp(message, "save", 4) == 0)
+		seq_num++;
+		if (strncmp(temp, "save", 4) == 0)
 		{
 			FILE* file = fopen("plik.txt", "rb");
 			if (file == NULL) {
 				perror("Nie udało się otworzyć pliku");
-				exit(1);
+				break;
 			}
 
 			// Wysyłanie komendy do serwera
-			if (sendto(client_socket, "save", 4, 0, (struct sockaddr*)&server_address, sizeof(server_address)) != message_length) {
+			if (sendto(client_socket, message, strlen(message), 0, (struct sockaddr*)&server_address, sizeof(server_address)) != strlen(message)) {
 				fprintf(stderr, "sendto failed\n");
 				break;
 			}
 			int n;
 
 			while ((n = fread(message, 1, MAX_MESSAGE_LENGTH, file)) > 0) {
-				if (sendto(client_socket, message, n, 0, (struct sockaddr*)&server_address, sizeof(server_address)) != n) {
+				message[n] = '\0';
+				strncpy(temp, message, strlen(message));
+				temp[strlen(message)] = '\0';
+				sprintf(message, "%d %s", seq_num, temp);
+				seq_num++;
+				if (sendto(client_socket, message, strlen(message), 0, (struct sockaddr*)&server_address, sizeof(server_address)) != strlen(message)) {
 					fprintf(stderr, "sendto failed\n");
 					break;
 				}
 			}
-			if (sendto(client_socket, "_END_", 5, 0, (struct sockaddr*)&server_address, sizeof(server_address)) != 5) {
+
+			sprintf(message, "%d %s", seq_num, "_END_");
+			if (sendto(client_socket, message, strlen(message), 0, (struct sockaddr*)&server_address, sizeof(server_address)) != strlen(message)) {
 				fprintf(stderr, "sendto failed\n");
 				break;
 			}
 		}
-		else if (strncmp(message, "download", 8) == 0)
+		else if (strncmp(temp, "download", 8) == 0)
 		{
 			// Wysyłanie komendy do serwera
-			if (sendto(client_socket, "download", 8, 0, (struct sockaddr*)&server_address, sizeof(server_address)) != message_length) {
+			if (sendto(client_socket, message, strlen(message), 0, (struct sockaddr*)&server_address, sizeof(server_address)) != strlen(message)) {
 				fprintf(stderr, "sendto failed\n");
 				break;
 			}
+			seq_num = 0;
 			while (1) {
 				int server_address_length = sizeof(server_address);
 				message_length = recvfrom(client_socket, message, MAX_MESSAGE_LENGTH, 0, (struct sockaddr*)&server_address, &server_address_length);
@@ -135,27 +163,39 @@ int main(int argc, char* argv[]) {
 					fprintf(stderr, "recvfrom failed\n");
 					break;
 				}
-				message[message_length] = '\0';
-				printf("%s\n", message);
+				int received_seq_num;
+				sscanf(message, "%d", &received_seq_num);
 
+
+				if (received_seq_num == seq_num) {
+					seq_num++;
+				}
+				else {
+					printf("Received message out of order. Expected sequence number: %d, received: %d\n", seq_num, received_seq_num);
+					return -1;
+				}
+				message[message_length] = '\0';
+				char* space_ptr = strchr(message, ' ');
+				if (space_ptr) { // if a space was found
+					memmove(message, space_ptr + 1, strlen(space_ptr));
+				}
 				// Sprawdzanie, czy otrzymano znak konca wysylania danych
 				if (strncmp(message, "_END_", 5) == 0)
 				{
 					break;
 				}
-				message[message_length] = '\0';
 				printf("%s", message);
 			}
 			printf("\n");
 
 		}
 		else // Wysłanie wiadomości do serwera
-			if (sendto(client_socket, message, message_length, 0, (struct sockaddr*)&server_address, sizeof(server_address)) != message_length) {
+			if (sendto(client_socket, message, strlen(message), 0, (struct sockaddr*)&server_address, sizeof(server_address)) != strlen(message)) {
 				fprintf(stderr, "sendto failed\n");
 				break;
 			}
 		// Sprawdzenie, czy użytkownik nie zakończył komunikacji
-		if (strcmp(message, "bye") == 0) {
+		if (strncmp(temp, "bye", 3) == 0) {
 			break;
 		}
 	}
@@ -164,6 +204,7 @@ int main(int argc, char* argv[]) {
 	closesocket(client_socket);
 
 	// Zwolnienie zasobów
+	SSL_free(ssl);
 	SSL_CTX_free(ssl_context);
 	WSACleanup();
 
