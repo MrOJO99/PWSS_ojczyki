@@ -40,6 +40,7 @@ int main(int argc, char* argv[]) {
 	struct sockaddr_in server_address;
 	SSL_CTX* ssl_context;
 	SSL* ssl;
+	BIO* bio;
 	char message[MAX_MESSAGE_LENGTH];
 	int message_length;
 
@@ -48,25 +49,17 @@ int main(int argc, char* argv[]) {
 		fprintf(stderr, "WSAStartup failed\n");
 		return 1;
 	}
-
 	// Inicjalizacja kontekstu szyfrowania SSL
 	SSL_library_init();
 	SSL_load_error_strings();
 	ERR_load_BIO_strings();
 	OpenSSL_add_all_algorithms();
 
-	ssl_context = SSL_CTX_new(DTLS_client_method());
-	if (ssl_context == NULL){
-		WSACleanup(); 
-		fprintf(stderr, "SSL_CTX_new failed\n");
-		return 1;
-	}
 
 	// Tworzenie gniazda klienta
 	client_socket = socket(AF_INET, SOCK_DGRAM, 0);
 	if (client_socket == INVALID_SOCKET) {
-		SSL_CTX_free(ssl_context);
-		WSACleanup(); 
+		WSACleanup();
 		fprintf(stderr, "socket failed\n");
 		return 1;
 	}
@@ -75,27 +68,61 @@ int main(int argc, char* argv[]) {
 	server_address.sin_addr.s_addr = inet_addr(SERVER);
 	server_address.sin_port = htons(PORT);
 
-	// Tworzenie kontekstu szyfrowania SSL
-	ssl = SSL_new(ssl_context);
-	if (ssl == NULL) {
-		SSL_CTX_free(ssl_context);
-		closesocket(client_socket);
-
-		WSACleanup(); 
-		fprintf(stderr, "SSL_new failed\n");
+	ssl_context = SSL_CTX_new(DTLSv1_client_method());
+	if (ssl_context == NULL) {
+		WSACleanup();
+		fprintf(stderr, "SSL_CTX_new failed\n");
 		return 1;
 	}
-	// Powiązanie kontekstu szyfrowania SSL z gniazdem połączenia
-	if (SSL_set_fd(ssl, client_socket) == NULL) {
+
+	if (SSL_CTX_use_certificate_file(ssl_context, "client.crt", SSL_FILETYPE_PEM) <= 0) {
 		SSL_CTX_free(ssl_context);
-		SSL_free(ssl);
+		WSACleanup();
+		exit(EXIT_FAILURE);
+	}
+
+	if (SSL_CTX_use_PrivateKey_file(ssl_context, "client.key", SSL_FILETYPE_PEM) <= 0) {
+		SSL_CTX_free(ssl_context);
+		WSACleanup();
+		exit(EXIT_FAILURE);
+	}
+	if (!SSL_CTX_check_private_key(ssl_context))
+	{
+		fprintf(stderr, "Private key does not match the public certificate\n");
+		SSL_CTX_free(ssl_context);
+		WSACleanup();
+		abort();
+	}
+
+	SSL_CTX_set_verify_depth(ssl_context, 2);
+	SSL_CTX_set_read_ahead(ssl_context, 1);
+
+	ssl = SSL_new(ssl_context);
+		if (ssl == NULL) {
+			SSL_CTX_free(ssl_context);
+			closesocket(client_socket);
+
+			WSACleanup();
+			fprintf(stderr, "SSL_new failed\n");
+			return 1;
+		}
+
+	bio = BIO_new_dgram(client_socket, BIO_CLOSE);
+
+	BIO_ctrl(bio, BIO_CTRL_DGRAM_SET_CONNECTED, 0, (struct sockaddr*)&server_address);
+	SSL_set_bio(ssl, bio, bio);
+
+	int ret = SSL_connect(ssl);
+	if (ret < 0) {
+		SSL_CTX_free(ssl_context);
 		closesocket(client_socket);
+		BIO_free(bio);
+		SSL_free(ssl);
 
 		WSACleanup();
-		fprintf(stderr, "SSL_set_fd failed\n");
+		fprintf(stderr, "SSL_connect failed\n");
 		return 1;
-	};
-
+	}
 
 	int seq_num = 0;
 	// Pętla komunikacji z serwerem
@@ -124,7 +151,7 @@ int main(int argc, char* argv[]) {
 			}
 
 			// Wysyłanie komendy do serwera
-			if (sendto(client_socket, message, strlen(message), 0, (struct sockaddr*)&server_address, sizeof(server_address)) != strlen(message)) {
+			if (SSL_write(ssl, message, strlen(message))) {
 				fprintf(stderr, "sendto failed\n");
 				break;
 			}
@@ -136,14 +163,14 @@ int main(int argc, char* argv[]) {
 				temp[strlen(message)] = '\0';
 				sprintf(message, "%d %s", seq_num, temp);
 				seq_num++;
-				if (sendto(client_socket, message, strlen(message), 0, (struct sockaddr*)&server_address, sizeof(server_address)) != strlen(message)) {
+				if (SSL_write(ssl, message, strlen(message))) {
 					fprintf(stderr, "sendto failed\n");
 					break;
 				}
 			}
 
 			sprintf(message, "%d %s", seq_num, "_END_");
-			if (sendto(client_socket, message, strlen(message), 0, (struct sockaddr*)&server_address, sizeof(server_address)) != strlen(message)) {
+			if (SSL_write(ssl, message, strlen(message))) {
 				fprintf(stderr, "sendto failed\n");
 				break;
 			}
@@ -151,14 +178,14 @@ int main(int argc, char* argv[]) {
 		else if (strncmp(temp, "download", 8) == 0)
 		{
 			// Wysyłanie komendy do serwera
-			if (sendto(client_socket, message, strlen(message), 0, (struct sockaddr*)&server_address, sizeof(server_address)) != strlen(message)) {
+			if (SSL_write(ssl, message, strlen(message))) {
 				fprintf(stderr, "sendto failed\n");
 				break;
 			}
 			seq_num = 0;
 			while (1) {
 				int server_address_length = sizeof(server_address);
-				message_length = recvfrom(client_socket, message, MAX_MESSAGE_LENGTH, 0, (struct sockaddr*)&server_address, &server_address_length);
+				message_length = SSL_read(ssl, message, MAX_MESSAGE_LENGTH);
 				if (message_length < 0) {
 					fprintf(stderr, "recvfrom failed\n");
 					break;
@@ -190,7 +217,7 @@ int main(int argc, char* argv[]) {
 
 		}
 		else // Wysłanie wiadomości do serwera
-			if (sendto(client_socket, message, strlen(message), 0, (struct sockaddr*)&server_address, sizeof(server_address)) != strlen(message)) {
+			if (SSL_write(ssl, message, strlen(message))) {
 				fprintf(stderr, "sendto failed\n");
 				break;
 			}
