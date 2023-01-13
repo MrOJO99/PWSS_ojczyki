@@ -43,6 +43,7 @@ int main(int argc, char* argv[]) {
 	BIO* bio;
 	char message[MAX_MESSAGE_LENGTH];
 	int message_length;
+	int seq_num = 0;
 
 	// Inicjalizacja biblioteki WinSock
 	if (WSAStartup(MAKEWORD(2, 2), &wsa_data) != 0) {
@@ -97,7 +98,19 @@ int main(int argc, char* argv[]) {
 	SSL_CTX_set_verify_depth(ssl_context, 2);
 	SSL_CTX_set_read_ahead(ssl_context, 1);
 
-	ssl = SSL_new(ssl_context);
+
+	// Pętla komunikacji z serwerem
+	while (1) {
+
+		connect(client_socket, (struct sockaddr*)&server_address, sizeof(server_address));
+
+		bio = BIO_new_dgram(client_socket, BIO_CLOSE);
+
+		BIO_ctrl(bio, BIO_CTRL_DGRAM_SET_CONNECTED, 0, (struct sockaddr*)&server_address);
+
+
+
+		ssl = SSL_new(ssl_context);
 		if (ssl == NULL) {
 			SSL_CTX_free(ssl_context);
 			closesocket(client_socket);
@@ -106,27 +119,19 @@ int main(int argc, char* argv[]) {
 			fprintf(stderr, "SSL_new failed\n");
 			return 1;
 		}
+		SSL_set_bio(ssl, bio, bio);
 
-	bio = BIO_new_dgram(client_socket, BIO_CLOSE);
+		int ret = SSL_connect(ssl);
+		if (ret < 0) {
+			SSL_CTX_free(ssl_context);
+			closesocket(client_socket);
+			BIO_free(bio);
+			SSL_free(ssl);
 
-	BIO_ctrl(bio, BIO_CTRL_DGRAM_SET_CONNECTED, 0, (struct sockaddr*)&server_address);
-	SSL_set_bio(ssl, bio, bio);
+			fprintf(stderr, "SSL_connect failed\n");
+			return 1;
+		}
 
-	int ret = SSL_connect(ssl);
-	if (ret < 0) {
-		SSL_CTX_free(ssl_context);
-		closesocket(client_socket);
-		BIO_free(bio);
-		SSL_free(ssl);
-
-		WSACleanup();
-		fprintf(stderr, "SSL_connect failed\n");
-		return 1;
-	}
-
-	int seq_num = 0;
-	// Pętla komunikacji z serwerem
-	while (1) {
 		seq_num = 0;
 		// Oczekiwanie na wprowadzenie wiadomości od użytkownika
 		printf("> ");
@@ -144,7 +149,7 @@ int main(int argc, char* argv[]) {
 		seq_num++;
 		if (strncmp(temp, "save", 4) == 0)
 		{
-			FILE* file = fopen("plik.txt", "rb");
+			FILE* file = fopen("juzu.png", "rb");
 			if (file == NULL) {
 				perror("Nie udało się otworzyć pliku");
 				break;
@@ -217,10 +222,14 @@ int main(int argc, char* argv[]) {
 
 		}
 		else // Wysłanie wiadomości do serwera
-			if (SSL_write(ssl, message, strlen(message))) {
+		{
+			int asd = (SSL_write(ssl, message, strlen(message)));
+			if (!asd) {
 				fprintf(stderr, "sendto failed\n");
 				break;
 			}
+		}
+
 		// Sprawdzenie, czy użytkownik nie zakończył komunikacji
 		if (strncmp(temp, "bye", 3) == 0) {
 			break;
